@@ -1,0 +1,338 @@
+<title>스네이크 프로토타입</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+  /* 아케이드 화면 컨셉 — 의도적 단일 테마 */
+  :root {
+    --bg: #0d1512;
+    --board: #101c16;
+    --grid: rgba(155, 210, 175, 0.06);
+    --snake-head: #8ff0a0;
+    --snake-tail: #2e9e5b;
+    --food: #ff7a5c;
+    --ink: #d9e8de;
+    --ink-dim: #6f8a7c;
+    --amber: #ffc857;
+    --line: rgba(155, 210, 175, 0.14);
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+    touch-action: none;
+  }
+  .frame {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 20px 16px calc(20px + env(safe-area-inset-bottom));
+    width: min(92vw, 440px);
+    user-select: none;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  h1 {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin: 0;
+    color: var(--ink);
+  }
+  h1 .dot { color: var(--food); }
+  .scores {
+    display: flex;
+    gap: 16px;
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    color: var(--ink-dim);
+  }
+  .scores b { color: var(--amber); font-weight: 700; }
+  .board-wrap { position: relative; }
+  canvas {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    background: var(--board);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    text-align: center;
+    background: rgba(13, 21, 18, 0.82);
+    backdrop-filter: blur(2px);
+    border-radius: 8px;
+    padding: 24px;
+  }
+  .overlay[hidden] { display: none; }
+  .overlay .big {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-wrap: balance;
+  }
+  .overlay .sub { font-size: 13px; color: var(--ink-dim); line-height: 1.7; }
+  .overlay .final { color: var(--amber); }
+  button {
+    font: inherit;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-size: 13px;
+    color: #0d1512;
+    background: var(--snake-head);
+    border: none;
+    border-radius: 6px;
+    padding: 12px 28px;
+    cursor: pointer;
+  }
+  button:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  footer {
+    font-size: 11.5px;
+    color: var(--ink-dim);
+    line-height: 1.8;
+    text-align: center;
+  }
+  kbd {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-family: inherit;
+  }
+</style>
+
+<div class="frame">
+  <header>
+    <h1>Snake<span class="dot">.</span></h1>
+    <div class="scores">
+      <span>점수 <b id="score">0</b></span>
+      <span>최고 <b id="best">0</b></span>
+    </div>
+  </header>
+
+  <div class="board-wrap">
+    <canvas id="game" width="600" height="600" aria-label="스네이크 게임 보드"></canvas>
+    <div class="overlay" id="overlay">
+      <div class="big" id="ovTitle">스네이크</div>
+      <div class="sub" id="ovBody">먹이 🟠 를 먹을수록 길어집니다.<br>벽이나 몸에 부딪히면 끝!</div>
+      <button id="startBtn">시작</button>
+    </div>
+  </div>
+
+  <footer>
+    모바일: 화면 스와이프 · PC: <kbd>←↑↓→</kbd> / <kbd>WASD</kbd>, <kbd>Space</kbd> 일시정지
+  </footer>
+</div>
+
+<script>
+(() => {
+  const N = 20;                       // 20x20 그리드
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const CELL = canvas.width / N;
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const overlay = document.getElementById('overlay');
+  const ovTitle = document.getElementById('ovTitle');
+  const ovBody = document.getElementById('ovBody');
+  const startBtn = document.getElementById('startBtn');
+
+  let snake, dir, nextDir, food, score, timer, interval, running = false, paused = false;
+  let best = Number(localStorage.getItem('snake_best') || 0);
+  bestEl.textContent = best;
+
+  function placeFood() {
+    let p;
+    do {
+      p = { x: Math.floor(Math.random() * N), y: Math.floor(Math.random() * N) };
+    } while (snake.some(s => s.x === p.x && s.y === p.y));
+    food = p;
+  }
+
+  function reset() {
+    snake = [{ x: 9, y: 10 }, { x: 8, y: 10 }, { x: 7, y: 10 }];
+    dir = { x: 1, y: 0 };
+    nextDir = dir;
+    score = 0;
+    interval = 160;                   // 시작 속도(ms/틱) — 먹을수록 빨라짐
+    scoreEl.textContent = 0;
+    placeFood();
+  }
+
+  function start() {
+    reset();
+    overlay.hidden = true;
+    running = true;
+    paused = false;
+    schedule();
+  }
+
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(tick, interval);
+  }
+
+  function gameOver() {
+    running = false;
+    clearTimeout(timer);
+    if (score > best) {
+      best = score;
+      localStorage.setItem('snake_best', best);
+      bestEl.textContent = best;
+    }
+    ovTitle.textContent = '게임 오버';
+    ovBody.innerHTML = '최종 점수 <span class="final">' + score + '</span> · 최고 ' + best;
+    startBtn.textContent = '다시 시작';
+    overlay.hidden = false;
+    draw();
+  }
+
+  function tick() {
+    dir = nextDir;
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+    const hitWall = head.x < 0 || head.y < 0 || head.x >= N || head.y >= N;
+    const hitSelf = snake.some(s => s.x === head.x && s.y === head.y);
+    if (hitWall || hitSelf) return gameOver();
+
+    snake.unshift(head);
+    if (head.x === food.x && head.y === food.y) {
+      score += 10;
+      scoreEl.textContent = score;
+      interval = Math.max(70, interval - 3);   // 점점 빨라짐
+      placeFood();
+    } else {
+      snake.pop();
+    }
+    draw();
+    schedule();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 은은한 그리드
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < N; i++) {
+      ctx.moveTo(i * CELL + 0.5, 0); ctx.lineTo(i * CELL + 0.5, canvas.height);
+      ctx.moveTo(0, i * CELL + 0.5); ctx.lineTo(canvas.width, i * CELL + 0.5);
+    }
+    ctx.stroke();
+
+    // 먹이 — 감귤색 원 + 은은한 글로우
+    const fx = (food.x + 0.5) * CELL, fy = (food.y + 0.5) * CELL;
+    ctx.save();
+    ctx.shadowColor = 'rgba(255, 122, 92, 0.55)';
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = '#ff7a5c';
+    ctx.beginPath();
+    ctx.arc(fx, fy, CELL * 0.32, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // 스네이크 — 머리→꼬리 밝기 그라데이션
+    snake.forEach((s, i) => {
+      const t = i / Math.max(1, snake.length - 1);
+      const r = Math.round(0x8f + (0x2e - 0x8f) * t);
+      const g = Math.round(0xf0 + (0x9e - 0xf0) * t);
+      const b = Math.round(0xa0 + (0x5b - 0xa0) * t);
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      const pad = i === 0 ? 1 : 2;
+      roundRect(s.x * CELL + pad, s.y * CELL + pad, CELL - pad * 2, CELL - pad * 2, i === 0 ? 6 : 4);
+    });
+
+    // 머리 눈
+    const h = snake[0];
+    ctx.fillStyle = '#0d1512';
+    const ex = h.x * CELL + CELL / 2 + dir.x * CELL * 0.18;
+    const ey = h.y * CELL + CELL / 2 + dir.y * CELL * 0.18;
+    const off = { x: dir.y * CELL * 0.16, y: dir.x * CELL * 0.16 };
+    ctx.beginPath();
+    ctx.arc(ex + off.x, ey + off.y, CELL * 0.07, 0, Math.PI * 2);
+    ctx.arc(ex - off.x, ey - off.y, CELL * 0.07, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    ctx.fill();
+  }
+
+  function setDir(x, y) {
+    if (!running || paused) return;
+    if (x === -dir.x && y === -dir.y) return;   // 역방향 금지
+    nextDir = { x, y };
+  }
+
+  function togglePause() {
+    if (!running) return;
+    paused = !paused;
+    if (paused) {
+      clearTimeout(timer);
+      ovTitle.textContent = '일시정지';
+      ovBody.textContent = 'Space 또는 화면 탭으로 계속';
+      startBtn.textContent = '계속';
+      overlay.hidden = false;
+    } else {
+      overlay.hidden = true;
+      schedule();
+    }
+  }
+
+  // 키보드
+  document.addEventListener('keydown', e => {
+    const k = e.key;
+    if (k === ' ') { e.preventDefault(); running ? togglePause() : start(); return; }
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) e.preventDefault();
+    if (k === 'ArrowUp' || k === 'w' || k === 'W') setDir(0, -1);
+    else if (k === 'ArrowDown' || k === 's' || k === 'S') setDir(0, 1);
+    else if (k === 'ArrowLeft' || k === 'a' || k === 'A') setDir(-1, 0);
+    else if (k === 'ArrowRight' || k === 'd' || k === 'D') setDir(1, 0);
+  });
+
+  // 터치 스와이프
+  let tx = null, ty = null;
+  document.addEventListener('touchstart', e => {
+    tx = e.touches[0].clientX; ty = e.touches[0].clientY;
+  }, { passive: true });
+  document.addEventListener('touchend', e => {
+    if (tx === null) return;
+    const dx = e.changedTouches[0].clientX - tx;
+    const dy = e.changedTouches[0].clientY - ty;
+    tx = ty = null;
+    if (Math.abs(dx) < 24 && Math.abs(dy) < 24) {
+      if (running && paused) togglePause();     // 탭으로 재개
+      return;
+    }
+    if (Math.abs(dx) > Math.abs(dy)) setDir(dx > 0 ? 1 : -1, 0);
+    else setDir(0, dy > 0 ? 1 : -1);
+  }, { passive: true });
+
+  startBtn.addEventListener('click', () => {
+    if (running && paused) togglePause();
+    else start();
+  });
+
+  reset();
+  draw();
+})();
+</script>
